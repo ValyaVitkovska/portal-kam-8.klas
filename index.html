@@ -1819,6 +1819,10 @@ function startGame(){
   state.results={};
   state.stationProgress={};
   state.scratchKey=null;
+  state.seenTaskIds=new Set();
+  state.skippedProblemTaskIds=new Set();
+  state.skippedTasksLog=[];
+  state.problemDialogOpen=false;
   resetScratchpad();
   renderApp();
 }
@@ -1864,7 +1868,7 @@ function submitAnswer(){
   const lvl = progress.currentTask;
   const correct = checkAnswer(field.value, lvl);
   progress.attempts++;
-  progress.history.push({q:lvl.q,userAnswer:field.value.trim(),correct,hintUsed:state.hintShown});
+  progress.history.push({taskId:lvl.taskId,q:lvl.q,userAnswer:field.value.trim(),correct,hintUsed:state.hintShown});
   state.answered = true;
   state.lastCorrect = correct;
   state.socraticOpen=false;
@@ -1922,6 +1926,12 @@ function markCurrentTaskProblem(){
   const level=state.level;
   const idx=taskIndexOf(st.id,skillKey,level,lvl);
   const id=taskIdOf(st.id,skillKey,level,idx);
+  // премахва от историята и от броя опити всички записи, принадлежащи именно на маркираната
+  // като проблемна задача — те не трябва да влияят на процента, оценката, адаптивната логика
+  // или кода за резултат; опитите на всички останали задачи остават непокътнати.
+  const removedCount=progress.history.filter(h=>h.taskId===lvl.taskId).length;
+  progress.history=progress.history.filter(h=>h.taskId!==lvl.taskId);
+  progress.attempts=Math.max(0,progress.attempts-removedCount);
   state.skippedProblemTaskIds.add(id);
   state.skippedTasksLog.push({station:st.id,stationTitle:st.title,skill:skillKey,skillLabel:lvl.skillLabel,level,taskIndex:idx,q:lvl.q,time:Date.now()});
   progress.skippedProblemCount=(progress.skippedProblemCount||0)+1;
@@ -2023,6 +2033,10 @@ function restartSame(){
   state.stationProgress={};
   state.activeIndex=null;
   state.scratchKey=null;
+  state.seenTaskIds=new Set();
+  state.skippedProblemTaskIds=new Set();
+  state.skippedTasksLog=[];
+  state.problemDialogOpen=false;
   resetScratchpad();
   renderApp();
 }
@@ -2034,6 +2048,10 @@ function restartNew(){
   state.stationProgress={};
   state.activeIndex=null;
   state.scratchKey=null;
+  state.seenTaskIds=new Set();
+  state.skippedProblemTaskIds=new Set();
+  state.skippedTasksLog=[];
+  state.problemDialogOpen=false;
   resetScratchpad();
   renderApp();
 }
