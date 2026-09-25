@@ -889,8 +889,120 @@ let state = {
   seenTaskIds:new Set(),           // всички варианти, показани поне веднъж в тази сесия
   skippedProblemTaskIds:new Set(), // варианти, маркирани от ученика като проблемни — никога не се показват отново
   skippedTasksLog:[],              // дневник за диагностика: {station,skill,level,taskIndex,q,time}
-  problemDialogOpen:false
+  problemDialogOpen:false,
+  newGamePromptOpen:false          // транзитно: потвърждение "Нова игра" на стартовия екран със запазена игра
 };
+
+/* =========================================================
+   АВТОМАТИЧНО ЗАПАЗВАНЕ НА ПРОГРЕСА (localStorage) — само в браузъра на ученика,
+   не се изпраща никъде. Пази се само реален игрови прогрес (ниво, гари, история,
+   защита срещу блокиране), никога преходни/визуални състояния (отворен модал,
+   подсказка, чернова и т.н.).
+   ========================================================= */
+const SAVE_KEY='portal8_saved_game_v1';
+const SAVE_VERSION=1;
+/* Намира реалния обект на задачата от TASK_BANK по нейния стабилен taskId
+   (гара:умение:ниво:индекс) — НЕ разчита на идентичност на обект (тя се губи
+   при JSON.stringify/parse), а на директно търсене по индекс в TASK_BANK.
+   Връща същия споделен обект, какъвто ползва останалата логика на играта, и
+   го тагва отново с skillKey/skillLabel/taskId, за да работят коректно
+   taskIndexOf/taskIdOf и защитата срещу блокиране след възстановяване. */
+function taskByTaskId(taskId){
+  if(!taskId || typeof taskId!=='string') return null;
+  const parts=taskId.split(':');
+  if(parts.length!==4) return null;
+  const stationId=Number(parts[0]);
+  const skillKey=parts[1];
+  const level=parts[2];
+  const idx=Number(parts[3]);
+  if(!Number.isFinite(stationId) || !Number.isFinite(idx) || idx<0) return null;
+  const list=taskListFor(stationId,skillKey,level);
+  const task=list[idx];
+  if(!task) return null;
+  task.skillKey=skillKey;
+  task.skillLabel=(SKILL_LABELS[stationId]||[])[SKILL_KEYS.indexOf(skillKey)]||'Математическо умение';
+  task.taskId=taskIdOf(stationId,skillKey,level,idx);
+  return task;
+}
+function serializeStationProgress(){
+  const out={};
+  for(const stId in state.stationProgress){
+    const p=state.stationProgress[stId];
+    out[stId]={
+      correct:p.correct, attempts:p.attempts, serial:p.serial,
+      currentTaskId:p.currentTask ? p.currentTask.taskId : null,
+      history:p.history, pendingRemediation:p.pendingRemediation, taskSolved:p.taskSolved,
+      hintsUsed:p.hintsUsed, skillOrder:p.skillOrder, wrongStreak:p.wrongStreak,
+      blockedHelpDismissed:p.blockedHelpDismissed, forcedAdvances:p.forcedAdvances,
+      skippedProblemCount:p.skippedProblemCount
+    };
+  }
+  return out;
+}
+function deserializeStationProgress(saved){
+  const out={};
+  if(!saved || typeof saved!=='object') return out;
+  for(const stId in saved){
+    const p=saved[stId]||{};
+    let currentTask=null;
+    if(p.currentTaskId) currentTask=taskByTaskId(p.currentTaskId);
+    const stationIdNum=Number(stId);
+    out[stId]={
+      correct:Number(p.correct)||0, attempts:Number(p.attempts)||0, serial:Number(p.serial)||0,
+      currentTask, history:Array.isArray(p.history)?p.history:[],
+      pendingRemediation:!!p.pendingRemediation, taskSolved:!!p.taskSolved,
+      hintsUsed:Number(p.hintsUsed)||0,
+      skillOrder:(Array.isArray(p.skillOrder) && p.skillOrder.length===SKILL_KEYS.length) ? p.skillOrder : shuffledSkills(stationIdNum),
+      wrongStreak:Number(p.wrongStreak)||0, blockedHelpDismissed:!!p.blockedHelpDismissed,
+      forcedAdvances:Number(p.forcedAdvances)||0, skippedProblemCount:Number(p.skippedProblemCount)||0
+    };
+  }
+  return out;
+}
+/* Извиква се след всяка съществена промяна в игровия прогрес (виж местата на извикване по-долу).
+   Не пази нищо, ако играта не е стартирана (state.level е null). */
+function saveGameProgress(){
+  if(!state.level) return;
+  try{
+    const payload={
+      version:SAVE_VERSION,
+      playerName:state.playerName,
+      level:state.level,
+      runSeed:state.runSeed,
+      currentIndex:state.currentIndex,
+      results:state.results,
+      stationProgress:serializeStationProgress(),
+      seenTaskIds:Array.from(state.seenTaskIds),
+      skippedProblemTaskIds:Array.from(state.skippedProblemTaskIds),
+      skippedTasksLog:state.skippedTasksLog,
+      savedAt:Date.now()
+    };
+    localStorage.setItem(SAVE_KEY,JSON.stringify(payload));
+  }catch(e){ /* localStorage недостъпен (частен режим, квота) — просто без запазване */ }
+}
+/* Чете и валидира запазения прогрес. При повреден/непълен/остарял запис го изтрива
+   и връща null, вместо да блокира приложението. */
+function loadGameProgress(){
+  try{
+    const raw=localStorage.getItem(SAVE_KEY);
+    if(!raw) return null;
+    const data=JSON.parse(raw);
+    if(!data || typeof data!=='object' || data.version!==SAVE_VERSION){ localStorage.removeItem(SAVE_KEY); return null; }
+    if(!data.level || !LEVEL_META[data.level]){ localStorage.removeItem(SAVE_KEY); return null; }
+    if(typeof data.results!=='object' || typeof data.stationProgress!=='object'){ localStorage.removeItem(SAVE_KEY); return null; }
+    return data;
+  }catch(e){
+    try{ localStorage.removeItem(SAVE_KEY); }catch(e2){}
+    return null;
+  }
+}
+function clearSavedGame(){
+  try{ localStorage.removeItem(SAVE_KEY); }catch(e){}
+}
+/* Данните от последната запазена игра, заредени еднократно при отваряне на страницата —
+   докато е различно от null, стартовият екран показва картата "Има запазена игра" вместо
+   обичайния избор на ниво (виж renderStart). */
+let pendingSavedGame=null;
 
 /* =========================================================
    ПОМОЩНИ ФУНКЦИИ ЗА ПРОВЕРКА НА ОТГОВОР
@@ -1337,7 +1449,39 @@ function renderTopbar(){
   </div>`;
 }
 
+/* Стартов екран, когато има валиден автоматично запазен прогрес — заменя обичайния
+   избор на име/ниво, докато ученикът изрично не избере „Нова игра“. */
+function renderSavedGameCard(){
+  const data=pendingSavedGame;
+  const meta=LEVEL_META[data.level];
+  const doneCount=Object.keys(data.results||{}).length;
+  return `
+  <div class="hero">
+    <div class="portal-icon"></div>
+    <h1>Портал към 8. клас</h1>
+    <p>Има запазена игра — можеш да продължиш точно откъдето си спрял(а), или да започнеш отначало.</p>
+  </div>
+  <div class="card">
+    <label class="field-label">Има запазена игра</label>
+    <p>Ниво: ${escapeHtml(meta ? meta.label : String(data.level))}<br>Завършени гари: ${doneCount} от ${STATIONS.length}</p>
+    ${state.newGamePromptOpen ? `
+      <p><strong>Това ще изтрие запазения напредък. Искаш ли да започнеш отначало?</strong></p>
+      <div class="start-actions">
+        <button class="btn ghost" data-action="new-game-cancel">Отказ</button>
+        <button class="btn" data-action="new-game-confirm">Да, нова игра</button>
+      </div>
+    ` : `
+      <div class="start-actions">
+        <button class="btn" data-action="continue-game">▶️ Продължи играта</button>
+        <button class="btn ghost" data-action="new-game-prompt">🔄 Нова игра</button>
+      </div>
+    `}
+  </div>
+  ${renderResourceCredit()}
+  `;
+}
 function renderStart(){
+  if(pendingSavedGame) return renderSavedGameCard();
   return `
   <div class="hero">
     <div class="portal-icon"></div>
@@ -1813,6 +1957,8 @@ function startGame(){
   const nameInput = document.getElementById('name-input');
   state.playerName = nameInput ? nameInput.value.trim() : '';
   if(!state.level) return;
+  clearSavedGame();
+  pendingSavedGame=null;
   state.runSeed=createRunSeed();
   state.screen='map';
   state.currentIndex=0;
@@ -1824,6 +1970,40 @@ function startGame(){
   state.skippedTasksLog=[];
   state.problemDialogOpen=false;
   resetScratchpad();
+  renderApp();
+}
+/* Възстановява запазена игра (данните вече заредени и валидирани в pendingSavedGame).
+   Никога не отваря автоматично модал със задача — ученикът сам избира гара от картата. */
+function continueGame(){
+  const data=pendingSavedGame;
+  if(!data) return;
+  state.playerName=data.playerName || '';
+  state.level=data.level;
+  state.runSeed=data.runSeed;
+  state.currentIndex=Number(data.currentIndex)||0;
+  state.results=data.results || {};
+  state.stationProgress=deserializeStationProgress(data.stationProgress);
+  state.seenTaskIds=new Set(data.seenTaskIds || []);
+  state.skippedProblemTaskIds=new Set(data.skippedProblemTaskIds || []);
+  state.skippedTasksLog=Array.isArray(data.skippedTasksLog) ? data.skippedTasksLog : [];
+  state.activeIndex=null;
+  state.activeStation=null;
+  state.reviewMode=false;
+  state.scratchKey=null;
+  state.newGamePromptOpen=false;
+  state.screen='map';
+  pendingSavedGame=null;
+  resetScratchpad();
+  renderApp();
+}
+function openNewGamePrompt(){ state.newGamePromptOpen=true; renderApp(); }
+function cancelNewGamePrompt(){ state.newGamePromptOpen=false; renderApp(); }
+/* Потвърдено изтриване на запазената игра от стартовия екран — показва обичайния
+   стартов екран за нова игра (избор на име/ниво), без да пипа нищо друго. */
+function confirmNewGame(){
+  clearSavedGame();
+  pendingSavedGame=null;
+  state.newGamePromptOpen=false;
   renderApp();
 }
 function openStation(index){
@@ -1840,6 +2020,7 @@ function openStation(index){
   state.socraticStep=0;
   state.solutionShown=false;
   state.problemDialogOpen=false;
+  saveGameProgress();
   attachModal();
 }
 function closeModal(){
@@ -1887,6 +2068,7 @@ function submitAnswer(){
     playCorrectSound();
     showRewardPop(['⭐','🌟','✨','🏆'][Math.floor(Math.random()*4)]);
   }
+  saveGameProgress();
   attachModal();
 }
 /* Позволява ново въвеждане на СЪЩАТА задача (без да се сменя вариантът и без да се пипат
@@ -1954,6 +2136,7 @@ function markCurrentTaskProblem(){
     state.socraticOpen=false;
     state.socraticStep=0;
     state.solutionShown=false;
+    saveGameProgress();
     attachModal();
     return;
   }
@@ -1975,6 +2158,7 @@ function markCurrentTaskProblem(){
   state.socraticOpen=false;
   state.socraticStep=0;
   state.solutionShown=false;
+  saveGameProgress();
   attachModal();
 }
 function openSocratic(){
@@ -2003,6 +2187,7 @@ function prepareFreshTask(forceSimilar){
   state.socraticStep=0;
   state.solutionShown=false;
   state.problemDialogOpen=false;
+  saveGameProgress();
   attachModal();
 }
 function similarTask(){ prepareFreshTask(true); }
@@ -2019,6 +2204,13 @@ function completeStation(){
   playStationCompleteSound();
   showStationBanner('🎉 Гара завършена!');
   closeModal();
+  if(Object.keys(state.results).length===STATIONS.length){
+    // всички 18 гари са завършени — незавършеният автоматичен запис вече не е нужен
+    // (при следващо отваряне не бива да се предлага „Продължи играта“ за завършено пътешествие)
+    clearSavedGame();
+  }else{
+    saveGameProgress();
+  }
   renderApp();
 }
 function finishGame(){
@@ -2026,6 +2218,8 @@ function finishGame(){
   renderApp();
 }
 function restartSame(){
+  clearSavedGame();
+  pendingSavedGame=null;
   state.runSeed=createRunSeed();
   state.screen='map';
   state.currentIndex=0;
@@ -2041,6 +2235,8 @@ function restartSame(){
   renderApp();
 }
 function restartNew(){
+  clearSavedGame();
+  pendingSavedGame=null;
   state.screen='start';
   state.level=null;
   state.currentIndex=0;
@@ -2084,6 +2280,10 @@ document.addEventListener('click', function(e){
   else if(action==='finish-game') finishGame();
   else if(action==='restart-same') restartSame();
   else if(action==='restart-new') restartNew();
+  else if(action==='continue-game') continueGame();
+  else if(action==='new-game-prompt') openNewGamePrompt();
+  else if(action==='new-game-cancel') cancelNewGamePrompt();
+  else if(action==='new-game-confirm') confirmNewGame();
   else if(action==='overlay-noop'){ /* клик върху фон - не затваряй, за да не се губи отговор случайно */ }
   else if(action==='print-results') window.print();
   else if(action==='open-verify') openVerify();
@@ -2255,6 +2455,12 @@ attachModal=function(){
   lastDialogTaskKey=state.scratchKey;
 };
 
+/* Проверка за запазена игра при първоначално зареждане на страницата — ако е валидна,
+   стартовият екран ще покаже картата "Има запазена игра" вместо обичайния избор. */
+pendingSavedGame=loadGameProgress();
+/* Резервен запис при затваряне/презареждане на раздела — не е единственият механизъм
+   (виж saveGameProgress() след всяка съществена промяна по-горе), а само подсигуряване. */
+window.addEventListener('beforeunload', saveGameProgress);
 renderApp();
 </script>
 </body>
