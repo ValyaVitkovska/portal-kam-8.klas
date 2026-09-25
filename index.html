@@ -960,9 +960,17 @@ function deserializeStationProgress(saved){
   return out;
 }
 /* Извиква се след всяка съществена промяна в игровия прогрес (виж местата на извикване по-долу).
-   Не пази нищо, ако играта не е стартирана (state.level е null). */
+   Не пази нищо, ако играта не е стартирана (state.level е null) или ученикът е все още на
+   стартовия екран (избрал е ниво, но не е натиснал „Влез в портала“) — иначе beforeunload
+   можеше да запише игра с 0 от 18 гари. Ако играта вече е завършена (финалният екран или
+   всичките 18 гари имат резултат), не се пази нищо ново — старият запис се изтрива, за да не
+   бъде „възкресен“ по-късно от beforeunload и предложен погрешно като „Продължи играта“. */
 function saveGameProgress(){
-  if(!state.level) return;
+  if(!state.level || state.screen==='start') return;
+  if(state.screen==='end' || Object.keys(state.results).length===STATIONS.length){
+    clearSavedGame();
+    return;
+  }
   try{
     const payload={
       version:SAVE_VERSION,
@@ -987,9 +995,17 @@ function loadGameProgress(){
     const raw=localStorage.getItem(SAVE_KEY);
     if(!raw) return null;
     const data=JSON.parse(raw);
-    if(!data || typeof data!=='object' || data.version!==SAVE_VERSION){ localStorage.removeItem(SAVE_KEY); return null; }
-    if(!data.level || !LEVEL_META[data.level]){ localStorage.removeItem(SAVE_KEY); return null; }
-    if(typeof data.results!=='object' || typeof data.stationProgress!=='object'){ localStorage.removeItem(SAVE_KEY); return null; }
+    const valid = data && typeof data==='object'
+      && data.version===SAVE_VERSION
+      && !!data.level && !!LEVEL_META[data.level]
+      && Number.isInteger(data.currentIndex) && data.currentIndex>=0 && data.currentIndex<=STATIONS.length
+      && (typeof data.runSeed==='number' || typeof data.runSeed==='string') && data.runSeed!==undefined && data.runSeed!==null && data.runSeed!==''
+      && data.results && typeof data.results==='object' && !Array.isArray(data.results)
+      && data.stationProgress && typeof data.stationProgress==='object' && !Array.isArray(data.stationProgress)
+      && Array.isArray(data.seenTaskIds)
+      && Array.isArray(data.skippedProblemTaskIds)
+      && Array.isArray(data.skippedTasksLog);
+    if(!valid){ localStorage.removeItem(SAVE_KEY); return null; }
     return data;
   }catch(e){
     try{ localStorage.removeItem(SAVE_KEY); }catch(e2){}
@@ -2214,6 +2230,9 @@ function completeStation(){
   renderApp();
 }
 function finishGame(){
+  // допълнителна гаранция (виж и saveGameProgress()/completeStation()): завършена игра
+  // никога не трябва да бъде предложена за "Продължи играта".
+  clearSavedGame();
   state.screen='end';
   renderApp();
 }
