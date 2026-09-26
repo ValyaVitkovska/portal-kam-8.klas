@@ -356,6 +356,11 @@
   @keyframes bannerPop{0%{opacity:0;transform:translate(-50%,-50%) scale(.6);}15%{opacity:1;transform:translate(-50%,-50%) scale(1.08);}25%{transform:translate(-50%,-50%) scale(1);}80%{opacity:1;}100%{opacity:0;transform:translate(-50%,-60%) scale(.94);}}
 
   footer.note{text-align:center;color:var(--text-dim);font-size:.78rem;margin-top:30px;opacity:.7;}
+  .adapt-note{margin:8px 0 0;padding:8px 10px;font-size:.82rem;color:var(--text-dim);background:rgba(124,92,255,.12);border:1px solid var(--card-border);border-radius:12px;line-height:1.4;}
+  .level-help{color:var(--text-dim);font-size:.85rem;margin:10px 0 0;line-height:1.45;}
+  .teacher-guide p{margin:0 0 12px;color:var(--text);font-size:.92rem;line-height:1.45;}
+  .teacher-guide p:last-child{margin-bottom:0;}
+  .teacher-guide code{font-size:.88em;}
 
   @media print{
     #stars-bg,.topbar,.btn,footer.note,.overlay{display:none !important;}
@@ -678,6 +683,37 @@ const LEVEL_META = {
   medium:{ label:"Ниво II — Средно", short:"Средно", cls:"b-medium", title:"Пътник между класовете" },
   hard:  { label:"Ниво III — Трудно", short:"Трудно", cls:"b-hard",  title:"Майстор на 7. клас" }
 };
+const LEVEL_ORDER = ['easy','medium','hard'];
+function shiftLevel(level, delta){
+  const i = LEVEL_ORDER.indexOf(level);
+  if(i<0) return level;
+  return LEVEL_ORDER[Math.max(0, Math.min(LEVEL_ORDER.length-1, i+delta))];
+}
+function resolveTaskLevel(stationId, skillKey, preferred){
+  if(taskListFor(stationId,skillKey,preferred).length) return preferred;
+  const start = LEVEL_ORDER.indexOf(preferred);
+  const order = [];
+  if(start>=0){
+    for(let d=1; d<LEVEL_ORDER.length; d++){
+      if(start-d>=0) order.push(LEVEL_ORDER[start-d]);
+      if(start+d<LEVEL_ORDER.length) order.push(LEVEL_ORDER[start+d]);
+    }
+  }else{
+    order.push('easy','medium','hard');
+  }
+  for(const lv of order){
+    if(taskListFor(stationId,skillKey,lv).length) return lv;
+  }
+  return preferred;
+}
+function taskLevelOf(task, fallback){
+  if(task && task.taskLevel && LEVEL_META[task.taskLevel]) return task.taskLevel;
+  if(task && task.taskId){
+    const lv = String(task.taskId).split(':')[2];
+    if(LEVEL_META[lv]) return lv;
+  }
+  return fallback || state.level;
+}
 
 const TASKS_PER_STATION = 3;
 const SKILL_KEYS = ['skill1','skill2','skill3'];
@@ -778,6 +814,8 @@ for(let __i=1; __i<=18; __i++){ TASK_FACTORIES[__i] = makeStationFactory(__i); }
 function getProgress(stationId){
   if(!state.stationProgress[stationId]){
     state.stationProgress[stationId]={correct:0,attempts:0,serial:0,currentTask:null,history:[],pendingRemediation:false,taskSolved:false,hintsUsed:0,skillOrder:shuffledSkills(stationId),
+      /* работно ниво вътре в гарата (може да се различава от избраното за пътуването) */
+      workingLevel:state.level,adaptReason:'',
       /* поле за защита срещу блокиране на дефектна задача (не участва в точкуването/адаптивността) */
       wrongStreak:0,blockedHelpDismissed:false,forcedAdvances:0,skippedProblemCount:0};
   }
@@ -800,25 +838,48 @@ function resetTaskAttemptFlags(progress){
   progress.pendingRemediation=false;
   progress.taskSolved=false;
 }
+function applyAdaptivityAfterSolved(progress){
+  const task=progress.currentTask;
+  if(!task) return;
+  const hist=(progress.history||[]).filter(h=>h.taskId===task.taskId);
+  const wrongs=hist.filter(h=>!h.correct).length;
+  const firstCorrect=hist.find(h=>h.correct);
+  const from=taskLevelOf(task, progress.workingLevel || state.level);
+  let to=from;
+  let reason='';
+  if(firstCorrect && hist.length===1 && !firstCorrect.hintUsed){
+    to=shiftLevel(from,1);
+    if(to!==from) reason='up';
+  }else if(wrongs>=2){
+    to=shiftLevel(from,-1);
+    if(to!==from) reason='down';
+  }
+  progress.workingLevel=to;
+  progress.adaptReason=reason;
+}
 function nextTaskFor(station,forceSimilar){
   const progress=getProgress(station.id);
+  if(!progress.workingLevel || !LEVEL_META[progress.workingLevel]) progress.workingLevel=state.level;
   const skillIndex=Math.min(progress.correct+(progress.forcedAdvances||0),TASKS_PER_STATION-1);
   const skillKey=progress.skillOrder[skillIndex];
   const factory=TASK_FACTORIES[station.id];
   const previousQuestion=progress.currentTask && progress.currentTask.q;
+  const preferred=resolveTaskLevel(station.id, skillKey, progress.workingLevel || state.level);
+  progress.workingLevel=preferred;
   let candidate=null;
   let safety=0;
   do{
     const variant=hashNumber(state.runSeed,station.id,skillKey,progress.serial++);
-    candidate=factory ? factory(skillKey,state.level,variant) : makeTask('Задачата не е налична.','', '','');
+    candidate=factory ? factory(skillKey,preferred,variant) : makeTask('Задачата не е налична.','', '','');
     safety++;
   }while(safety<12 && (
     (forceSimilar && candidate.q===previousQuestion) ||
-    state.skippedProblemTaskIds.has(taskIdOf(station.id,skillKey,state.level,candidate))
+    state.skippedProblemTaskIds.has(taskIdOf(station.id,skillKey,preferred,candidate))
   ));
   candidate.skillKey=skillKey;
   candidate.skillLabel=(SKILL_LABELS[station.id]||[])[SKILL_KEYS.indexOf(skillKey)]||'Математическо умение';
-  candidate.taskId=taskIdOf(station.id,skillKey,state.level,candidate);
+  candidate.taskId=taskIdOf(station.id,skillKey,preferred,candidate);
+  candidate.taskLevel=preferred;
   state.seenTaskIds.add(candidate.taskId);
   progress.currentTask=candidate;
   resetTaskAttemptFlags(progress);
@@ -842,7 +903,9 @@ function pickReplacementTask(station,skillKey,level,currentTask){
   const pool = unseen.length ? unseen : candidates;
   const progress=getProgress(station.id);
   const pick = pool[hashNumber(state.runSeed,station.id,skillKey,level,'skip',progress.serial++) % pool.length];
-  return {task:list[pick.idx], index:pick.idx, id:pick.id};
+  const task=list[pick.idx];
+  task.taskLevel=level;
+  return {task, index:pick.idx, id:pick.id};
 }
 function socraticPrompts(task){
   return [
@@ -890,6 +953,7 @@ let state = {
   skippedProblemTaskIds:new Set(), // варианти, маркирани от ученика като проблемни — никога не се показват отново
   skippedTasksLog:[],              // дневник за диагностика: {station,skill,level,taskIndex,q,time}
   problemDialogOpen:false,
+  teacherGuideOpen:false,
   newGamePromptOpen:false          // транзитно: потвърждение "Нова игра" на стартовия екран със запазена игра
 };
 
@@ -922,6 +986,7 @@ function taskByTaskId(taskId){
   task.skillKey=skillKey;
   task.skillLabel=(SKILL_LABELS[stationId]||[])[SKILL_KEYS.indexOf(skillKey)]||'Математическо умение';
   task.taskId=taskIdOf(stationId,skillKey,level,idx);
+  task.taskLevel=level;
   return task;
 }
 function serializeStationProgress(){
@@ -934,7 +999,8 @@ function serializeStationProgress(){
       history:p.history, pendingRemediation:p.pendingRemediation, taskSolved:p.taskSolved,
       hintsUsed:p.hintsUsed, skillOrder:p.skillOrder, wrongStreak:p.wrongStreak,
       blockedHelpDismissed:p.blockedHelpDismissed, forcedAdvances:p.forcedAdvances,
-      skippedProblemCount:p.skippedProblemCount
+      skippedProblemCount:p.skippedProblemCount,
+      workingLevel:p.workingLevel, adaptReason:p.adaptReason||''
     };
   }
   return out;
@@ -954,7 +1020,9 @@ function deserializeStationProgress(saved){
       hintsUsed:Number(p.hintsUsed)||0,
       skillOrder:(Array.isArray(p.skillOrder) && p.skillOrder.length===SKILL_KEYS.length) ? p.skillOrder : shuffledSkills(stationIdNum),
       wrongStreak:Number(p.wrongStreak)||0, blockedHelpDismissed:!!p.blockedHelpDismissed,
-      forcedAdvances:Number(p.forcedAdvances)||0, skippedProblemCount:Number(p.skippedProblemCount)||0
+      forcedAdvances:Number(p.forcedAdvances)||0, skippedProblemCount:Number(p.skippedProblemCount)||0,
+      workingLevel:(p.workingLevel && LEVEL_META[p.workingLevel]) ? p.workingLevel : (state.level || 'easy'),
+      adaptReason:p.adaptReason||''
     };
   }
   return out;
@@ -1153,8 +1221,10 @@ function verifyResultCode(codeRaw){
     perStation: STATIONS.map((st,i)=>({title:st.title, correct:digits[i]}))
   };
 }
-function openVerify(){ state.verifyOpen = true; state.verifyResult = null; attachVerifyRoot(); }
+function openVerify(){ state.verifyOpen = true; state.verifyResult = null; state.teacherGuideOpen = false; attachVerifyRoot(); }
 function closeVerify(){ state.verifyOpen = false; state.verifyResult = null; attachVerifyRoot(); }
+function openTeacherGuide(){ state.teacherGuideOpen = true; state.verifyOpen = false; attachVerifyRoot(); }
+function closeTeacherGuide(){ state.teacherGuideOpen = false; attachVerifyRoot(); }
 function doVerifyCode(){
   const input = document.getElementById('verify-input');
   state.verifyResult = verifyResultCode(input ? input.value : '');
@@ -1183,6 +1253,7 @@ function renderVerifyModal(){
         <div class="feedback correct" style="margin-top:12px;">
           <div><strong>Валиден код</strong> · ниво ${escapeHtml(r.level)} · дата ${escapeHtml(r.date)}</div>
           <div>Общо верни задачи: ${r.correctTotal} от ${r.totalTasks} · опити: ${r.attemptsTotal}</div>
+          <div style="margin-top:8px;font-size:.85rem;opacity:.9;">Нивото е това, което ученикът е избрал в началото. Ако в гарата задачите са ставали по-лесни или по-трудни, това не променя показаното тук ниво.</div>
         </div>
         <table class="results" style="margin-top:10px;"><tbody>${rows}</tbody></table>`;
     }
@@ -1196,6 +1267,7 @@ function renderVerifyModal(){
       </div>
       <div class="task-reading" tabindex="0">
         <p>Въведи кода, който ученикът е получил на финалния екран, за да видиш резултата му по гари.</p>
+        <p style="color:var(--text-dim);font-size:.85rem;">Кодът показва избраното ниво, датата, верните задачи по гари (0–3) и общия брой опити. Той е за класна стая — проверява дали низът не е сгрешен при преписване. Не е криптографски подпис.</p>
         <input type="text" id="verify-input" placeholder="Напр. A0302..." style="width:100%;font-family:monospace;letter-spacing:1px;box-sizing:border-box;">
         ${resultHtml}
       </div>
@@ -1209,7 +1281,36 @@ function renderVerifyModal(){
 function attachVerifyRoot(){
   const root = document.getElementById('verify-root');
   if(!root) return;
-  root.innerHTML = renderVerifyModal();
+  root.innerHTML = renderTeacherGuideModal() + renderVerifyModal();
+}
+
+function teacherGuideBody(){
+  return `<div class="teacher-guide">
+    <p><strong>Цел.</strong> Входен преговор на математиката от 7. клас преди 8. клас — диагностика и упражнение, не нов урок.</p>
+    <p><strong>Време.</strong> 18 гари по 3 верни задачи. В един учебен час обикновено се минават няколко гари; цялото пътуване е реалистично около 40–80 минути според нивото. Прогресът се запазва в браузъра на ученика, затова работата може да се раздели на няколко занятия.</p>
+    <p><strong>Как да се отвори.</strong> Файлът <code>index.html</code> се отваря в актуален браузър. Не са нужни акаунт, инсталация или интернет след зареждане. Ако няма интернет, шрифтовете се заменят с наличните на устройството — играта остава четима.</p>
+    <p><strong>Код за резултат.</strong> На финалния екран ученикът получава кратък код. От началния екран отворете „Проверка на код за резултат“, въведете кода и виждате: нивото, избрано в началото, датата, верните задачи по гари (0–3) и общия брой опити. Кодът е за класна стая (проверка срещу грешно преписване). Не е криптографски подпис: ученик, който отвори кода на страницата, теоретично може да състави подобен низ.</p>
+    <p><strong>Адаптивност.</strong> Ученикът избира ниво за цялото пътуване. Вътре в гарата следващата задача става по-лесна след два неверни опита на предишната и по-трудна след верен отговор от първи опит без подсказка. Кодът за учителя продължава да показва нивото, избрано в началото.</p>
+  </div>`;
+}
+function renderTeacherGuideModal(){
+  if(!state.teacherGuideOpen) return '';
+  return `
+  <div class="overlay" data-action="close-teacher-overlay">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="teacher-guide-title" style="max-width:560px;">
+      <div class="modal-header">
+        <span class="ic">📘</span>
+        <div><h2 id="teacher-guide-title">Ръководство за учителя</h2></div>
+      </div>
+      <div class="task-reading" tabindex="0">
+        ${teacherGuideBody()}
+      </div>
+      <div class="answer-row">
+        <button class="btn" data-action="open-verify">Проверка на код</button>
+        <button class="btn ghost" data-action="close-teacher-guide">Затвори</button>
+      </div>
+    </div>
+  </div>`;
 }
 
 /* =========================================================
@@ -1329,8 +1430,8 @@ function renderResourceCredit(compact=false){
 
 function geoMessage(mode,lvl){
   const name = state.playerName ? `, ${escapeHtml(state.playerName)}` : '';
-  if(mode==='start') return `Аз съм Гео! Избери ниво за цялото пътешествие. Ще бъда до теб във всяка гара с кратки указания и насоки.`;
-  if(mode==='map') return `Следвай светещата отключена гара${name}. Във всяка гара те чакат три различни умения на избраното ниво.`;
+  if(mode==='start') return `Аз съм Гео! Избери ниво за цялото пътешествие. Вътре в гарата следващата задача може да стане по-лесна или по-трудна според опитите ти. Ще бъда до теб с кратки указания.`;
+  if(mode==='map') return `Следвай светещата отключена гара${name}. Във всяка гара те чакат три различни умения. Ако се затрудниш, следващата задача може да стане по-лесна; ако се справиш от първи опит без подсказка — по-трудна.`;
   if(mode==='end') return `Браво${name}! Премина през целия портал. Погледни резултатите и отбележи кои теми искаш да упражниш още.`;
   if(mode==='review') return `Тази гара вече е завършена. Можеш спокойно да прегледаш резултата си.`;
   if(state.answered && state.lastCorrect) return `Браво${name}! Отговорът е верен. Прегледай решението и продължи към следващата задача. 🌟`;
@@ -1493,6 +1594,10 @@ function renderSavedGameCard(){
       </div>
     `}
   </div>
+  <div class="start-actions" style="margin-top:6px;">
+    <button class="btn ghost" data-action="open-teacher-guide">📘 Ръководство за учителя</button>
+    <button class="btn ghost" data-action="open-verify">🧑‍🏫 Проверка на код</button>
+  </div>
   ${renderResourceCredit()}
   `;
 }
@@ -1521,6 +1626,7 @@ function renderStart(){
         </div>
       `).join('')}
     </div>
+    <p class="level-help">Нивото важи за цялото пътешествие. Вътре в гарата следващата задача може да стане по-лесна след две грешки или по-трудна след верен отговор от първи опит без подсказка.</p>
   </div>
 
   ${renderGeoGuide('start',null,true)}
@@ -1529,7 +1635,8 @@ function renderStart(){
   </div>
   <footer class="note">18 гари · ${TASKS_PER_STATION} верни задачи на гара</footer>
   <div class="start-actions" style="margin-top:6px;">
-    <button class="btn ghost" data-action="open-verify">🧑‍🏫 За учителя: проверка на код за резултат</button>
+    <button class="btn ghost" data-action="open-teacher-guide">📘 Ръководство за учителя</button>
+    <button class="btn ghost" data-action="open-verify">🧑‍🏫 Проверка на код за резултат</button>
   </div>
   ${renderResourceCredit()}
   `;
@@ -1638,6 +1745,12 @@ function renderQuestionModal(){
         <button class="btn small" data-action="problem-skip">⏭ Друга задача</button>
       </div>
     </div>` : '';
+  const taskLv = taskLevelOf(lvl, state.level);
+  const adaptHtml = (!isReview && progress.adaptReason==='down')
+    ? `<div class="adapt-note">Тази задача е на ниво „${LEVEL_META[taskLv].short}“, защото предишната в гарата се оказа трудна. Пътуването остава на ниво „${LEVEL_META[state.level].short}“.</div>`
+    : (!isReview && progress.adaptReason==='up')
+      ? `<div class="adapt-note">Тази задача е на ниво „${LEVEL_META[taskLv].short}“, защото предишната беше решена от първи опит без подсказка. Пътуването остава на ниво „${LEVEL_META[state.level].short}“.</div>`
+      : '';
 
   return `
   <div class="overlay" data-action="overlay-noop">
@@ -1646,7 +1759,8 @@ function renderQuestionModal(){
         <span class="ic">${st.icon}</span>
         <div>
           <h2 id="task-title">Гара ${state.activeIndex+1}: ${st.title}</h2>
-          <span class="level-tag ${LEVEL_META[state.level].cls}">${LEVEL_META[state.level].short}</span>
+          <span class="level-tag ${LEVEL_META[state.level].cls}">${taskLv===state.level ? LEVEL_META[state.level].short : 'Път: '+LEVEL_META[state.level].short}</span>
+          ${(!isReview && taskLv!==state.level) ? `<span class="level-tag ${LEVEL_META[taskLv].cls}">Задача: ${LEVEL_META[taskLv].short}</span>` : ''}
           ${!isReview ? `<div class="task-counter">Задача ${Math.min(progress.correct+(progress.forcedAdvances||0)+1,TASKS_PER_STATION)} от ${TASKS_PER_STATION} · ${lvl.skillLabel||'Математическо умение'}</div>` : ''}
           ${!isReview ? `<div class="mini-progress">${Array.from({length:TASKS_PER_STATION},(_,i)=>`<span class="${i<progress.correct+(progress.forcedAdvances||0)?'done':''}"></span>`).join('')}</div>` : ''}
         </div>
@@ -1655,6 +1769,7 @@ function renderQuestionModal(){
       ${renderGeoGuide(isReview?'review':'task',lvl)}
       <div class="task-reading" tabindex="0" aria-label="Условие и помощ">
       ${!isReview ? `<div class="question-text">${escapeHtml(lvl.q)}</div>` : ''}
+      ${adaptHtml}
       ${!isReview && lvl.visual ? `<details class="task-figure" open><summary>📐 Чертеж към задачата</summary><div class="task-visual">${lvl.visual}</div></details>` : ''}
       ${state.hintShown && !isReview ? `<div class="hint-box">💡 Подсказка: ${escapeHtml(lvl.hint)}</div>` : ''}
       ${feedbackHtml}
@@ -2121,7 +2236,7 @@ function markCurrentTaskProblem(){
   const lvl=progress.currentTask;
   if(!lvl) return;
   const skillKey=lvl.skillKey;
-  const level=state.level;
+  const level=taskLevelOf(lvl, state.level);
   const idx=taskIndexOf(st.id,skillKey,level,lvl);
   const id=taskIdOf(st.id,skillKey,level,idx);
   // премахва от историята и от броя опити всички записи, принадлежащи именно на маркираната
@@ -2142,6 +2257,7 @@ function markCurrentTaskProblem(){
     replacement.task.skillKey=skillKey;
     replacement.task.skillLabel=lvl.skillLabel;
     replacement.task.taskId=replacement.id;
+    replacement.task.taskLevel=level;
     state.seenTaskIds.add(replacement.id);
     progress.currentTask=replacement.task;
     resetTaskAttemptFlags(progress);
@@ -2207,7 +2323,11 @@ function prepareFreshTask(forceSimilar){
   attachModal();
 }
 function similarTask(){ prepareFreshTask(true); }
-function nextTask(){ prepareFreshTask(true); }
+function nextTask(){
+  const st=STATIONS[state.activeIndex];
+  if(st) applyAdaptivityAfterSolved(getProgress(st.id));
+  prepareFreshTask(true);
+}
 function completeStation(){
   const st=STATIONS[state.activeIndex];
   const progress=getProgress(st.id);
@@ -2307,6 +2427,9 @@ document.addEventListener('click', function(e){
   else if(action==='print-results') window.print();
   else if(action==='open-verify') openVerify();
   else if(action==='close-verify') closeVerify();
+  else if(action==='open-teacher-guide') openTeacherGuide();
+  else if(action==='close-teacher-guide') closeTeacherGuide();
+  else if(action==='close-teacher-overlay'){ /* клик върху фон - не затваряй */ }
   else if(action==='close-verify-overlay'){ /* клик върху фон - не затваряй, за да не се загуби въведеният код случайно */ }
   else if(action==='verify-code') doVerifyCode();
   else if(action==='copy-result-code') copyResultCode();
