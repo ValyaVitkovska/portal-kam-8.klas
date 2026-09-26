@@ -386,6 +386,9 @@ body.modal-open #app{height:var(--view-height);min-height:0;overflow:hidden;}
 .workspace{display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:14px;flex:1;min-height:0;}
 .task-column{display:flex;flex-direction:column;min-height:0;min-width:0;gap:8px;}
 .task-reading{min-height:0;flex:1;overflow:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:var(--card-border) transparent;padding:1px 3px 3px 0;overflow-wrap:anywhere;}
+@media(min-width:701px){
+ .task-column>.task-reading{flex:0 1 auto;}
+}
 .question-text{font-size:clamp(.93rem,1.6vw,1.12rem);margin:0;line-height:1.42;}
 .task-figure{margin:8px 0 0;}
 .task-figure summary{cursor:pointer;color:var(--accent2);font-size:.78rem;font-weight:800;min-height:30px;}
